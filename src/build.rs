@@ -247,7 +247,13 @@ fn unit_crate_type(unit: &Unit) -> String {
         Kind::Lib => {
             if unit.target.kind.iter().any(|k| k == "proc-macro") {
                 "proc-macro".to_string()
-            } else if unit.is_root && unit.target.crate_types.iter().any(|c| c == "cdylib") {
+            } else if unit.is_root
+                && unit
+                    .target
+                    .crate_types
+                    .iter()
+                    .any(|c| c == "cdylib" || c == "staticlib")
+            {
                 // rustc's archive step can consume the objects' debug info.
                 // Link images before packaging the same objects into archives.
                 let mut crate_types = unit.target.crate_types.clone();
@@ -285,6 +291,12 @@ fn is_debug_object(name: &str) -> bool {
     name.ends_with(".o")
 }
 
+/// A static archive already holds its objects, so it has no debug map to keep
+/// them for.
+fn is_static_archive(name: &str) -> bool {
+    name.ends_with(".a")
+}
+
 /// Under `check`, units outside every execution closure (build scripts,
 /// proc-macros) emit metadata only: they neither link nor produce rlibs.
 fn is_checked(ctx: &Ctx, idx: usize) -> bool {
@@ -308,7 +320,9 @@ fn macos_linked_image(ctx: &Ctx, index: usize) -> bool {
     } else {
         ctx.target.as_deref().unwrap_or(&ctx.host)
     };
-    is_linking(ctx, index) && is_apple_target(platform)
+    let staticlib_only =
+        matches!(unit.kind, Kind::Lib) && unit.target.crate_types.iter().all(|c| c == "staticlib");
+    is_linking(ctx, index) && is_apple_target(platform) && !staticlib_only
 }
 
 fn is_apple_target(platform: &str) -> bool {
@@ -6466,12 +6480,14 @@ fn build_inner(
                         written.push(dest);
                     }
                 }
-                if matches!(u.kind, Kind::Lib) && u.is_root && !u.host {
+                if matches!(u.kind, Kind::Lib) && u.is_root {
                     if let Some(r) = results[i].get() {
                         for o in &r.res.outputs {
-                            if o.name.ends_with(".wasm")
-                                || o.name.ends_with(".dylib")
-                                || o.name.ends_with(".so")
+                            if is_static_archive(&o.name)
+                                || (!u.host
+                                    && (o.name.ends_with(".wasm")
+                                        || o.name.ends_with(".dylib")
+                                        || o.name.ends_with(".so")))
                             {
                                 let dest = ctx.export_binary(i, o, &r.res)?;
                                 filenames.push(dest.clone());
@@ -7488,8 +7504,12 @@ impl Ctx {
         let objects = res
             .outputs
             .iter()
-            .filter(|output| spec.debug_binary.is_some() && is_debug_object(&output.name))
-            .map(|output| (output.name.as_str(), output.hash.as_str()))
+            .filter(|object| {
+                spec.debug_binary.is_some()
+                    && !is_static_archive(&output.name)
+                    && is_debug_object(&object.name)
+            })
+            .map(|object| (object.name.as_str(), object.hash.as_str()))
             .collect::<Vec<_>>();
         if !objects.is_empty() && spec.debug_binary.as_ref() != Some(&relative) {
             bail!("export path does not match the binary's recorded debug-object directory");

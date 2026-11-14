@@ -4443,6 +4443,49 @@ fn debug_objects_follow_each_non_root_executable_output_directory() {
     assert_success(&output, "run test harnesses from a custom directory");
 }
 
+#[test]
+fn build_exports_a_staticlib_archive() {
+    let directory = TestDirectory::new("staticlib-export");
+    let workspace = directory.path.join("workspace");
+    let store = shared_store(&directory);
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    fs::write(
+        workspace.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [lib]\ncrate-type = [\"staticlib\"]\n",
+            directory.package_name
+        ),
+    )
+    .unwrap();
+    fs::write(
+        workspace.join("src/lib.rs"),
+        "#[unsafe(no_mangle)]\npub extern \"C\" fn exported_value() -> u32 { 42 }\n",
+    )
+    .unwrap();
+
+    let output = invoke_corgi_with_store(&workspace, "build", [], &store);
+    assert_success(&output, "corgi build of a staticlib crate");
+
+    let archive = workspace
+        .join("target/debug")
+        .join(format!("lib{}.a", directory.package_name.replace('-', "_")));
+    let bytes = fs::read(&archive)
+        .unwrap_or_else(|error| panic!("missing archive {}: {error}", archive.display()));
+    assert!(
+        bytes.starts_with(b"!<arch>\n"),
+        "{} is not an ar archive",
+        archive.display()
+    );
+    assert!(
+        bytes
+            .windows(b"exported_value".len())
+            .any(|window| window == b"exported_value"),
+        "{} does not contain the exported symbol",
+        archive.display()
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn debug_objects_are_exported_for_dylibs_when_crate_type_order_changes() {
